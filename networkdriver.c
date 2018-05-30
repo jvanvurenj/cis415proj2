@@ -1,28 +1,36 @@
-
 #include "BoundedBuffer.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <time.h>
+#include <sched.h>
 #include "packetdescriptor.h"
 #include "destination.h"
 #include "pid.h"
 #include "freepacketdescriptorstore.h"
 #include "diagnostics.h"
-
+#include "networkdriver.h"
 #include "networkdevice.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <pthread.h>
-#include <time.h>
+#include "networkdevice__full.h"
+#include "freepacketdescriptorstore__full.h"
+#define TRUE 1
 
-#define SEND_BUFFER_SIZE 50
-#define RECV_BUFFER_SIZE 50
-#define RECSIZE 10
+#define SEND_BUFFER_SIZE 10
+#define RECV_BUFFER_SIZE 2
+#define RECSIZE 4
 
 NetworkDevice *networkdev;
 FreePacketDescriptorStore *fpds;
 
-BoundedBuffer *toSend, toReceive;
-BoundedBuffer *buf[MAX_PID+1] //do i need +1
+BoundedBuffer *toSend;
+BoundedBuffer *toReceive;
+BoundedBuffer *buf[MAX_PID+1]; //do i need +1
 
 
+
+void* send_thread();
+void* receive_thread(); //need to define for init
 
 void do_nanosleep(int nseconds) /* helper sleep function.*///FROM LAB
 {
@@ -37,12 +45,12 @@ void do_nanosleep(int nseconds) /* helper sleep function.*///FROM LAB
 /* These are the calls to be implemented by the students */
 
 void blocking_send_packet(PacketDescriptor *pd){
-	blockingWriteBB(toSend, pd);
+	toSend->blockingWrite(toSend, pd);
 	return;
 }
 
 int  nonblocking_send_packet(PacketDescriptor *pd){
-	return nonblockingWriteBB(toSend, pd);
+	return toSend->nonblockingWrite(toSend, pd);
 }
 /* These calls hand in a PacketDescriptor for dispatching */
 /* The nonblocking call must return promptly, indicating whether or */
@@ -53,11 +61,11 @@ int  nonblocking_send_packet(PacketDescriptor *pd){
 /* Neither call should delay until the packet is actually sent      */
 
 void blocking_get_packet(PacketDescriptor **pd, PID pid){
-	*pd = blockingReadBB(buf[pid]);
+	buf[pid]->blockingRead(buf[pid], (void**)pd);
 }
 int  nonblocking_get_packet(PacketDescriptor **pd, PID pid){
 	int i;
-	i = nonblockingReadBB(buf[pid], pd);
+	i = buf[pid]->nonblockingRead(buf[pid], (void**)pd);
 	return i;
 }
 /* These represent requests for packets by the application threads */
@@ -77,34 +85,38 @@ void init_network_driver(NetworkDevice               *nd,
                          void                        *mem_start, 
                          unsigned long               mem_length,
                          FreePacketDescriptorStore **fpds_ptr){
-
-
+	////NetworkDevice_create(); //do i need this? or is it already init'd?
 	networkdev = nd;
 	pthread_t sendThread, receiveThread;
 	fpds = FreePacketDescriptorStore_create(mem_start, mem_length);
 	*fpds_ptr = fpds;
-	PacketDescriptor *pd;
 
 
 
-	/*CREATE PTHREADS*/
-	pthread_create(&sendThread, NULL, sthread, NULL);
-	pthread_create(&receiveThread, NULL, rthread, NULL);
+	///*CREATE PTHREADS*/
+	//pthread_create(&sendThread, NULL, send_thread, NULL);
+	//pthread_create(&receiveThread, NULL, receive_thread, NULL);
 
 
 	/*CREATE BUFFERS*/ //most from lab
 	int i;
+	PacketDescriptor *pd;
 
-	toSend = createBB(SEND_BUFFER_SIZE);
-	toReceive = createBB(RECV_BUFFER_SIZE);
+	toSend = BoundedBuffer_create(SEND_BUFFER_SIZE);
+	toReceive = BoundedBuffer_create(RECV_BUFFER_SIZE);
 
-	for(i=0; i<MAX_PID; i++){
-		buf[i]= createBB(RECV_BUFFER_SIZE)
+	for(i=0; i<=MAX_PID; i++){
+		buf[i]= BoundedBuffer_create(RECV_BUFFER_SIZE);
 	}
 	for(i=0;i<RECSIZE;i++){//from lab //can i just use send_receive_size?
-		blockingGet(fpds, &pd);
-		blockingWriteBB(toReceive);
+		fpds->blockingGet(fpds, &pd);
+		toReceive->blockingWrite(toReceive, &pd);
 	}
+
+	/*CREATE PTHREADS*/
+	pthread_create(&sendThread, NULL, send_thread, NULL);
+	pthread_create(&receiveThread, NULL, receive_thread, NULL);
+
 
 }
 /* Called before any other methods, to allow you to initialise */
@@ -119,35 +131,38 @@ void init_network_driver(NetworkDevice               *nd,
 
 
 void* receive_thread(){
+
 	PID curPID;
 	int counter, temp;
 	counter = 0;
 	PacketDescriptor *current;
 	PacketDescriptor *todo;
-	PacketDescriptor *previous;
-	blockingGet(fpds, &current);
+	//PacketDescriptor *previous;
+	fpds->blockingGet(fpds, &current);
 	initPD(current);
-	registerPD(netdev, current);
+	networkdev->registerPD(networkdev, current);
 
 
 
 
 
-	while(true){
-		awaitIncomingPacket(netdev);
+	while(TRUE){
+
+		networkdev->awaitIncomingPacket(networkdev);
 		counter++;
 		todo = current;
-		DIAGNOSTICS("Received! Total count: %d\n", counter);
+		DIAGNOSTICS("Received! Total packet count: %d\n", counter);
 		//need to check if went through
-		temp = nonblockingGet(fpds, &current)
+		temp = toReceive->nonblockingRead(toReceive, (void**)&current);
 		if(temp==1){
+			//DIAGNOSTICS("is the problem here?\n\n\n");
 			initPD(current);
-			registerPD(netdev, current);
+			networkdev->registerPD(networkdev, current);
 			curPID = getPID(todo);
-			temp = nonblockingWriteBB(buf[curPID], todo);
+			temp = buf[curPID]->nonblockingWrite(buf[curPID], todo);
 			if(temp !=1){
 				DIAGNOSTICS("RThread: Read failed on %u, buffer full, trying fpds\n", curPID);
-				temp = nonblockingPut(fpds, todo);
+				temp = fpds->nonblockingPut(fpds, todo);
 				if(temp!=1){
 					DIAGNOSTICS("RThread: Packet Descriptor store failed on %u\n", curPID);
 				}
@@ -158,15 +173,16 @@ void* receive_thread(){
 
 
 		//need else if cuz could be both
-		else if(nonblockingGet(fpds, &current)){
+		else if(fpds->nonblockingGet(fpds, &current)){
+			//DIAGNOSTICS("is the problem here?\n\n\n");
 			//literally do the exact same thing?
 			initPD(current);
-			registerPD(netdev, current);
+			networkdev->registerPD(networkdev, current);
 			curPID = getPID(todo);
-			temp = nonblockingWriteBB(buf[curPID], todo);
+			temp = buf[curPID]->nonblockingWrite(buf[curPID], todo);
 			if(temp !=1){
 				DIAGNOSTICS("RThread: Read failed on %u, buffer full, trying fpds\n", curPID);
-				temp = nonblockingPut(fpds, todo);
+				temp = fpds->nonblockingPut(fpds, todo);
 				if(temp!=1){
 					DIAGNOSTICS("RThread: Packet Descriptor store failed on %u\n", curPID);
 				}
@@ -177,12 +193,14 @@ void* receive_thread(){
 
 
 		else{
-			temp = nonblockingPut(fpds, todo);
+			//DIAGNOSTICS("is the problem here?\n\n\n");
+			temp = buf[curPID]->nonblockingWrite(buf[curPID], todo);
 			if(temp!=1){
 				DIAGNOSTICS("RThread: Packet Descriptor store failed on %u\n", curPID);
 			}
 			current = todo;
-			registerPD(netdev, current);
+			initPD(current);
+			networkdev->registerPD(networkdev, current);
 		}
 
 
@@ -198,12 +216,13 @@ void* receive_thread(){
 
 
 void* send_thread(){
-	PacketDescriptor *current;
+	PacketDescriptor* current;
+	//initPD(current);
 	int i, temp;
 
-	while(true){
-		current = (PacketDescriptor*)blockingReadBB(toSend);
-		temp = sendPacket(netdev, current);
+	while(TRUE){
+		toSend->blockingRead(toSend, (void**)&current);
+		temp = networkdev->sendPacket(networkdev, current);
 		if (temp == 1){
 			DIAGNOSTICS("SThread: Packet sent!\n");
 		}
@@ -212,7 +231,7 @@ void* send_thread(){
 			for(i=0; i<10;i++){
 
 				do_nanosleep(100000);
-				temp = sendPacket(netdev, current);
+				temp = networkdev->sendPacket(networkdev, current);
 				if (temp == 1){
 					DIAGNOSTICS("SThread: Packet sent!\n");
 					break;
@@ -221,13 +240,13 @@ void* send_thread(){
 		}
 
 
-		temp = nonblockingWriteBB(toReceive, current);
+		temp = toReceive->nonblockingWrite(toReceive, current);
 		if(temp!=1){
-			temp = nonblockingPut(fpds,current);
+			temp = fpds->nonblockingPut(fpds,current);
 			if(temp!=1){
 				DIAGNOSTICS("RThread: Packet Descriptor store failed\n");
 			}
 		}
-		return NULL;
 	}
+	return NULL;
 }
