@@ -1,3 +1,18 @@
+/*
+Author: Jackson VanVuren
+CIS415 Project 2
+
+This is my own work except:
+General outline was taken from lab
+do_nanosleep is from lab
+most of creating buffers: from lab
+
+sizes of buffers were helped by Taisei Klasen
+
+Starter code and all include files provided by Joe Sventek
+*/
+
+
 #include "BoundedBuffer.h"
 
 #include <stdio.h>
@@ -17,20 +32,15 @@
 #define TRUE 1
 
 #define SEND_BUFFER_SIZE 10
-#define RECV_BUFFER_SIZE 2
-#define RECSIZE 4
+#define RECV_BUFFER_SIZE 4
+#define RECSIZE 2
 
-NetworkDevice *networkdev;
+NetworkDevice *networkdevice;
 FreePacketDescriptorStore *fpds;
 
 BoundedBuffer *toSend;
 BoundedBuffer *toReceive;
-BoundedBuffer *buf[MAX_PID+1]; //do i need +1
-
-
-
-void* send_thread();
-void* receive_thread(); //need to define for init
+BoundedBuffer *buf[MAX_PID+1]; //do 
 
 void do_nanosleep(int nseconds) /* helper sleep function.*///FROM LAB
 {
@@ -41,6 +51,128 @@ void do_nanosleep(int nseconds) /* helper sleep function.*///FROM LAB
 	time2.tv_nsec = 0;
 	nanosleep( &time, &time2);
 }
+
+void* rthread(){
+
+	PID curPID;
+	int counter, temp;
+	counter = 0;
+	PacketDescriptor *current;
+	PacketDescriptor *todo;
+	//PacketDescriptor *previous;
+	fpds->blockingGet(fpds, &current);
+	initPD(current);
+	networkdevice->registerPD(networkdevice, current);
+
+
+
+
+
+	while(TRUE){
+
+		networkdevice->awaitIncomingPacket(networkdevice);
+		counter++;
+		todo = current;
+		DIAGNOSTICS("Received! Total packet count: %d\n", counter);
+		//need to check if went through
+		temp = toReceive->nonblockingRead(toReceive, (void**)&current);
+		if(temp==1){
+			//DIAGNOSTICS("is the problem here?\n\n\n");
+			initPD(current);
+			networkdevice->registerPD(networkdevice, current);
+			curPID = getPID(todo);
+			temp = buf[curPID]->nonblockingWrite(buf[curPID], todo);
+			if(temp !=1){
+				DIAGNOSTICS("RThread: Read failed on %u, buffer full, trying fpds\n", curPID);
+				temp = fpds->nonblockingPut(fpds, todo);
+				if(temp!=1){
+					DIAGNOSTICS("RThread: Packet Descriptor store failed on %u\n", curPID);
+				}
+			}
+		}
+
+
+
+
+		//need else if cuz could be both
+		else if(fpds->nonblockingGet(fpds, &current)){
+			//DIAGNOSTICS("is the problem here?\n\n\n");
+			
+			initPD(current);
+			networkdevice->registerPD(networkdevice, current);
+			curPID = getPID(todo);
+			temp = buf[curPID]->nonblockingWrite(buf[curPID], todo);
+			if(temp !=1){
+				DIAGNOSTICS("RThread: Read failed on %u, buffer full, trying fpds\n", curPID);
+				temp = fpds->nonblockingPut(fpds, todo);
+				if(temp!=1){
+					DIAGNOSTICS("RThread: Packet Descriptor store failed on %u\n", curPID);
+				}
+			}
+
+		}
+
+
+
+		else{
+			//DIAGNOSTICS("is the problem here?\n\n\n");
+			temp = buf[curPID]->nonblockingWrite(buf[curPID], todo);
+			if(temp!=1){
+				DIAGNOSTICS("RThread: Packet Descriptor store failed on %u\n", curPID);
+			}
+			current = todo;
+			initPD(current);
+			networkdevice->registerPD(networkdevice, current);
+		}
+
+
+
+	}
+
+
+
+	return NULL;
+}
+
+
+
+
+void* sthread(){
+	PacketDescriptor* current;
+	//initPD(current);
+	int i, temp;
+
+	while(TRUE){
+		toSend->blockingRead(toSend, (void**)&current);
+		temp = networkdevice->sendPacket(networkdevice, current);
+		if (temp == 1){
+			DIAGNOSTICS("SThread: Packet sent!\n");
+		}
+
+		else{
+			for(i=0; i<10;i++){
+
+				do_nanosleep(100000);
+				temp = networkdevice->sendPacket(networkdevice, current);
+				if (temp == 1){
+					DIAGNOSTICS("SThread: Packet sent!\n");
+					break;
+				}
+			}
+		}
+
+
+		temp = toReceive->nonblockingWrite(toReceive, current);
+		if(temp!=1){
+			temp = fpds->nonblockingPut(fpds,current);
+			if(temp!=1){
+				DIAGNOSTICS("RThread: Packet Descriptor store failed\n");
+			}
+		}
+	}
+	return NULL;
+}
+
 
 /* These are the calls to be implemented by the students */
 
@@ -86,19 +218,19 @@ void init_network_driver(NetworkDevice               *nd,
                          unsigned long               mem_length,
                          FreePacketDescriptorStore **fpds_ptr){
 	////NetworkDevice_create(); //do i need this? or is it already init'd?
-	networkdev = nd;
+	networkdevice = nd;
 	pthread_t sendThread, receiveThread;
 	fpds = FreePacketDescriptorStore_create(mem_start, mem_length);
 	*fpds_ptr = fpds;
 
 
 
-	///*CREATE PTHREADS*/
-	//pthread_create(&sendThread, NULL, send_thread, NULL);
-	//pthread_create(&receiveThread, NULL, receive_thread, NULL);
+
+	//pthread_create(&sendThread, NULL, sthread, NULL);
+	//pthread_create(&receiveThread, NULL, rthread, NULL);
 
 
-	/*CREATE BUFFERS*/ //most from lab
+	//buffers//most from lab
 	int i;
 	PacketDescriptor *pd;
 
@@ -106,16 +238,16 @@ void init_network_driver(NetworkDevice               *nd,
 	toReceive = BoundedBuffer_create(RECV_BUFFER_SIZE);
 
 	for(i=0; i<=MAX_PID; i++){
-		buf[i]= BoundedBuffer_create(RECV_BUFFER_SIZE);
+		buf[i]= BoundedBuffer_create(RECSIZE);
 	}
-	for(i=0;i<RECSIZE;i++){//from lab //can i just use send_receive_size?
+	for(i=0;i<RECV_BUFFER_SIZE;i++){//from lab //can i just use send_receive_size?
 		fpds->blockingGet(fpds, &pd);
 		toReceive->blockingWrite(toReceive, &pd);
 	}
 
-	/*CREATE PTHREADS*/
-	pthread_create(&sendThread, NULL, send_thread, NULL);
-	pthread_create(&receiveThread, NULL, receive_thread, NULL);
+	//pthreads
+	pthread_create(&sendThread, NULL, sthread, NULL);
+	pthread_create(&receiveThread, NULL, rthread, NULL);
 
 
 }
@@ -130,123 +262,3 @@ void init_network_driver(NetworkDevice               *nd,
 /*       passing in pointers to each of them                     */ 
 
 
-void* receive_thread(){
-
-	PID curPID;
-	int counter, temp;
-	counter = 0;
-	PacketDescriptor *current;
-	PacketDescriptor *todo;
-	//PacketDescriptor *previous;
-	fpds->blockingGet(fpds, &current);
-	initPD(current);
-	networkdev->registerPD(networkdev, current);
-
-
-
-
-
-	while(TRUE){
-
-		networkdev->awaitIncomingPacket(networkdev);
-		counter++;
-		todo = current;
-		DIAGNOSTICS("Received! Total packet count: %d\n", counter);
-		//need to check if went through
-		temp = toReceive->nonblockingRead(toReceive, (void**)&current);
-		if(temp==1){
-			//DIAGNOSTICS("is the problem here?\n\n\n");
-			initPD(current);
-			networkdev->registerPD(networkdev, current);
-			curPID = getPID(todo);
-			temp = buf[curPID]->nonblockingWrite(buf[curPID], todo);
-			if(temp !=1){
-				DIAGNOSTICS("RThread: Read failed on %u, buffer full, trying fpds\n", curPID);
-				temp = fpds->nonblockingPut(fpds, todo);
-				if(temp!=1){
-					DIAGNOSTICS("RThread: Packet Descriptor store failed on %u\n", curPID);
-				}
-			}
-		}
-
-
-
-
-		//need else if cuz could be both
-		else if(fpds->nonblockingGet(fpds, &current)){
-			//DIAGNOSTICS("is the problem here?\n\n\n");
-			//literally do the exact same thing?
-			initPD(current);
-			networkdev->registerPD(networkdev, current);
-			curPID = getPID(todo);
-			temp = buf[curPID]->nonblockingWrite(buf[curPID], todo);
-			if(temp !=1){
-				DIAGNOSTICS("RThread: Read failed on %u, buffer full, trying fpds\n", curPID);
-				temp = fpds->nonblockingPut(fpds, todo);
-				if(temp!=1){
-					DIAGNOSTICS("RThread: Packet Descriptor store failed on %u\n", curPID);
-				}
-			}
-
-		}
-
-
-
-		else{
-			//DIAGNOSTICS("is the problem here?\n\n\n");
-			temp = buf[curPID]->nonblockingWrite(buf[curPID], todo);
-			if(temp!=1){
-				DIAGNOSTICS("RThread: Packet Descriptor store failed on %u\n", curPID);
-			}
-			current = todo;
-			initPD(current);
-			networkdev->registerPD(networkdev, current);
-		}
-
-
-
-	}
-
-
-
-	return NULL;
-}
-
-
-
-
-void* send_thread(){
-	PacketDescriptor* current;
-	//initPD(current);
-	int i, temp;
-
-	while(TRUE){
-		toSend->blockingRead(toSend, (void**)&current);
-		temp = networkdev->sendPacket(networkdev, current);
-		if (temp == 1){
-			DIAGNOSTICS("SThread: Packet sent!\n");
-		}
-
-		else{
-			for(i=0; i<10;i++){
-
-				do_nanosleep(100000);
-				temp = networkdev->sendPacket(networkdev, current);
-				if (temp == 1){
-					DIAGNOSTICS("SThread: Packet sent!\n");
-					break;
-				}
-			}
-		}
-
-
-		temp = toReceive->nonblockingWrite(toReceive, current);
-		if(temp!=1){
-			temp = fpds->nonblockingPut(fpds,current);
-			if(temp!=1){
-				DIAGNOSTICS("RThread: Packet Descriptor store failed\n");
-			}
-		}
-	}
-	return NULL;
-}
